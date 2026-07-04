@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>Bon de sortie cuisine</title>
+<script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body{
+    font-family: "Segoe UI", Arial, sans-serif;
+    margin: 0;
+    padding: 14px;
+    color: #222;
+    background: #fafafa;
+  }
+  .toolbar{
+    display:flex;
+    gap:10px;
+    align-items:center;
+    flex-wrap:wrap;
+    margin-bottom:14px;
+  }
+  button{
+    padding:7px 14px;
+    font-size:13px;
+    border:1px solid #2f5496;
+    background:#2f5496;
+    color:#fff;
+    border-radius:6px;
+    cursor:pointer;
+    white-space:nowrap;
+  }
+  button.secondary{
+    background:#fff;
+    color:#2f5496;
+  }
+  button:disabled{
+    opacity:.5;
+    cursor:not-allowed;
+  }
+  button:hover:not(:disabled){ opacity:.9; }
+  .statut{
+    font-size:12px;
+    color:#777;
+    font-style:italic;
+  }
+  #content{
+    background:#fff;
+    border:1px solid #ccc;
+    border-radius:8px;
+    padding:18px 20px;
+    max-width:900px;
+  }
+  #content .empty{
+    color:#777;
+    font-style:italic;
+    margin:0;
+  }
+  .bon-export-block{
+    margin-bottom:0;
+  }
+  .saut-page{
+    page-break-before: always;
+    break-before: page;
+  }
+  @media print{
+    .toolbar{ display:none; }
+    #content{ border:none; padding:0; max-width:none; }
+  }
+</style>
+</head>
+<body>
+
+  <div class="toolbar">
+    <button id="btnExportCourant" disabled>Exporter ce bon de sortie (PDF)</button>
+    <button id="btnExportTout" class="secondary">Exporter tous les bons de sortie (PDF)</button>
+    <span id="statut" class="statut"></span>
+  </div>
+
+  <div id="content">
+    <p class="empty">Sélectionnez une ligne dans le tableau pour afficher son bon de sortie.</p>
+  </div>
+
+  <!-- conteneur hors ecran utilise pour construire le PDF global -->
+  <div id="exportZone" style="position:absolute; left:-99999px; top:0; width:900px;"></div>
+
+<script>
+let currentHtml = '';
+let currentTitre = 'Bon_de_sortie';
+
+function extraireTitre(htmlStr){
+  const m1 = htmlStr.match(/<h1[^>]*>(.*?)<\/h1>/);
+  const m2 = htmlStr.match(/<h2[^>]*>(.*?)<\/h2>/);
+  const jour = m1 ? m1[1].replace(/<[^>]+>/g, '') : '';
+  const repas = m2 ? m2[1].replace(/<[^>]+>/g, '') : '';
+  const nettoye = (jour + '_' + repas)
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  return nettoye || 'Bon_de_sortie';
+}
+
+function setStatut(msg){
+  document.getElementById('statut').textContent = msg || '';
+}
+
+grist.ready({
+  columns: [
+    { name: "Html", title: "Bon de sortie (HTML)", type: "Text", optional: false }
+  ],
+  requiredAccess: 'full',
+});
+
+grist.onRecord((record, mappings) => {
+  const mapped = (grist.mapColumnNames && grist.mapColumnNames(record, mappings)) || record;
+  currentHtml = (mapped && mapped.Html) || '';
+  const content = document.getElementById('content');
+  const btn = document.getElementById('btnExportCourant');
+  if (currentHtml) {
+    content.innerHTML = currentHtml;
+    currentTitre = extraireTitre(currentHtml);
+    btn.disabled = false;
+  } else {
+    content.innerHTML = '<p class="empty">Sélectionnez une ligne dans le tableau pour afficher son bon de sortie.</p>';
+    btn.disabled = true;
+  }
+});
+
+document.getElementById('btnExportCourant').addEventListener('click', () => {
+  if (!currentHtml) return;
+  setStatut('Génération du PDF…');
+  const conteneur = document.createElement('div');
+  conteneur.style.width = '900px';
+  conteneur.innerHTML = currentHtml;
+  html2pdf()
+    .set({
+      margin: 10,
+      filename: currentTitre + '.pdf',
+      html2canvas: { scale: 2 },
+      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+      pagebreak: { mode: ['css', 'legacy'] },
+    })
+    .from(conteneur)
+    .save()
+    .then(() => setStatut(''))
+    .catch(err => setStatut('Erreur : ' + err.message));
+});
+
+document.getElementById('btnExportTout').addEventListener('click', async () => {
+  const btn = document.getElementById('btnExportTout');
+  btn.disabled = true;
+  setStatut('Chargement des données…');
+  try {
+    const [effectifTable, jourTable, repasTable] = await Promise.all([
+      grist.docApi.fetchTable('Effectif'),
+      grist.docApi.fetchTable('Jour'),
+      grist.docApi.fetchTable('Repas'),
+    ]);
+
+    const ordreJour = {};
+    for (let i = 0; i < jourTable.id.length; i++) {
+      ordreJour[jourTable.id[i]] = jourTable.Ordre ? jourTable.Ordre[i] : 0;
+    }
+    const ORDRE_REPAS = ['Petit-déjeuner', 'Déjeuner', 'Goûter', 'Pique-nique', 'BBQ', 'Dîner'];
+    const libelleRepas = {};
+    for (let i = 0; i < repasTable.id.length; i++) {
+      libelleRepas[repasTable.id[i]] = repasTable.Libelle[i];
+    }
+
+    const lignes = [];
+    for (let i = 0; i < effectifTable.id.length; i++) {
+      const html = effectifTable.Html ? effectifTable.Html[i] : '';
+      if (!html) continue;
+      const idJour = effectifTable.IdJour[i];
+      const idRepas = effectifTable.IdRepas[i];
+      const libRepas = libelleRepas[idRepas] || '';
+      lignes.push({
+        html,
+        ordreJour: ordreJour[idJour] || 0,
+        ordreRepas: ORDRE_REPAS.indexOf(libRepas),
+      });
+    }
+
+    lignes.sort((a, b) => {
+      if (a.ordreJour !== b.ordreJour) return a.ordreJour - b.ordreJour;
+      const ra = a.ordreRepas === -1 ? 99 : a.ordreRepas;
+      const rb = b.ordreRepas === -1 ? 99 : b.ordreRepas;
+      return ra - rb;
+    });
+
+    if (lignes.length === 0) {
+      setStatut('Aucun bon de sortie à exporter.');
+      btn.disabled = false;
+      return;
+    }
+
+    const zone = document.getElementById('exportZone');
+    zone.innerHTML = '';
+    lignes.forEach((l, idx) => {
+      const bloc = document.createElement('div');
+      bloc.className = 'bon-export-block' + (idx > 0 ? ' saut-page' : '');
+      bloc.innerHTML = l.html;
+      zone.appendChild(bloc);
+    });
+
+    setStatut('Génération du PDF (' + lignes.length + ' bons de sortie)…');
+
+    await html2pdf()
+      .set({
+        margin: 10,
+        filename: 'Bons_de_sortie_complets.pdf',
+        html2canvas: { scale: 2 },
+        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+        pagebreak: { mode: ['css', 'legacy'], before: '.saut-page' },
+      })
+      .from(zone)
+      .save();
+
+    setStatut('');
+  } catch (err) {
+    setStatut('Erreur : ' + err.message);
+  } finally {
+    btn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>
