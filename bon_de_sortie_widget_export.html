@@ -1,10 +1,12 @@
+
 <!DOCTYPE html>
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
 <title>Bon de sortie cuisine</title>
 <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <style>
   * { box-sizing: border-box; }
   body{
@@ -49,20 +51,14 @@
     background:#fff;
     border:1px solid #ccc;
     border-radius:8px;
-    padding:18px 20px;
-    max-width:900px;
+    padding:16px 20px;
+    max-width:1200px;
+    overflow-x:auto;
   }
   #content .empty{
     color:#777;
     font-style:italic;
     margin:0;
-  }
-  .bon-export-block{
-    margin-bottom:0;
-  }
-  .saut-page{
-    page-break-before: always;
-    break-before: page;
   }
   @media print{
     .toolbar{ display:none; }
@@ -82,10 +78,19 @@
     <p class="empty">Sélectionnez une ligne dans le tableau pour afficher son bon de sortie.</p>
   </div>
 
-  <!-- conteneur hors ecran utilise pour construire le PDF global -->
-  <div id="exportZone" style="position:absolute; left:-99999px; top:0; width:900px;"></div>
+  <!-- conteneur hors ecran utilise pour le rendu des PDF (largeur fixe = paysage) -->
+  <div id="renderZone" style="position:fixed; left:-99999px; top:0; width:1400px; background:#fff;"></div>
 
 <script>
+const { jsPDF } = window.jspdf;
+
+// largeur de reference "paysage" (A4 paysage = 297mm). On rend le contenu a
+// une largeur fixe en pixels puis on calcule la hauteur de page necessaire
+// pour que TOUT le contenu tienne sur une seule page, quelle que soit sa
+// longueur (le PDF s'adapte plutot que de couper sur plusieurs pages).
+const LARGEUR_PAGE_MM = 297;
+const LARGEUR_RENDU_PX = 1400;
+
 let currentHtml = '';
 let currentTitre = 'Bon_de_sortie';
 
@@ -103,6 +108,26 @@ function extraireTitre(htmlStr){
 
 function setStatut(msg){
   document.getElementById('statut').textContent = msg || '';
+}
+
+// Rend un fragment HTML dans la zone hors-ecran et retourne un canvas
+async function rendreCanvas(htmlStr){
+  const zone = document.getElementById('renderZone');
+  zone.innerHTML = htmlStr;
+  // laisser le temps au navigateur de mettre en page avant capture
+  await new Promise(r => setTimeout(r, 30));
+  const canvas = await html2canvas(zone, {
+    scale: 2,
+    backgroundColor: '#ffffff',
+    width: LARGEUR_RENDU_PX,
+    windowWidth: LARGEUR_RENDU_PX,
+  });
+  return canvas;
+}
+
+function canvasVersDimensionsMm(canvas){
+  const hauteurMm = (canvas.height / canvas.width) * LARGEUR_PAGE_MM;
+  return { largeur: LARGEUR_PAGE_MM, hauteur: hauteurMm };
 }
 
 grist.ready({
@@ -127,31 +152,30 @@ grist.onRecord((record, mappings) => {
   }
 });
 
-document.getElementById('btnExportCourant').addEventListener('click', () => {
+document.getElementById('btnExportCourant').addEventListener('click', async () => {
   if (!currentHtml) return;
+  const btn = document.getElementById('btnExportCourant');
+  btn.disabled = true;
   setStatut('Génération du PDF…');
-  const conteneur = document.createElement('div');
-  conteneur.style.width = '900px';
-  conteneur.innerHTML = currentHtml;
-  html2pdf()
-    .set({
-      margin: 10,
-      filename: currentTitre + '.pdf',
-      html2canvas: { scale: 2 },
-      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
-      pagebreak: { mode: ['css', 'legacy'] },
-    })
-    .from(conteneur)
-    .save()
-    .then(() => setStatut(''))
-    .catch(err => setStatut('Erreur : ' + err.message));
+  try {
+    const canvas = await rendreCanvas(currentHtml);
+    const { largeur, hauteur } = canvasVersDimensionsMm(canvas);
+    const pdf = new jsPDF({ unit: 'mm', format: [largeur, hauteur], orientation: 'landscape' });
+    pdf.addImage(canvas.toDataURL('image/png'), 'PNG', 0, 0, largeur, hauteur);
+    pdf.save(currentTitre + '.pdf');
+    setStatut('');
+  } catch (err) {
+    setStatut('Erreur : ' + err.message);
+  } finally {
+    btn.disabled = false;
+  }
 });
 
 document.getElementById('btnExportTout').addEventListener('click', async () => {
   const btn = document.getElementById('btnExportTout');
   btn.disabled = true;
-  setStatut('Chargement des données…');
   try {
+    setStatut('Chargement des données…');
     const [effectifTable, jourTable, repasTable] = await Promise.all([
       grist.docApi.fetchTable('Effectif'),
       grist.docApi.fetchTable('Jour'),
@@ -195,28 +219,20 @@ document.getElementById('btnExportTout').addEventListener('click', async () => {
       return;
     }
 
-    const zone = document.getElementById('exportZone');
-    zone.innerHTML = '';
-    lignes.forEach((l, idx) => {
-      const bloc = document.createElement('div');
-      bloc.className = 'bon-export-block' + (idx > 0 ? ' saut-page' : '');
-      bloc.innerHTML = l.html;
-      zone.appendChild(bloc);
-    });
+    let pdf = null;
+    for (let i = 0; i < lignes.length; i++) {
+      setStatut('Génération du PDF… (' + (i + 1) + ' / ' + lignes.length + ')');
+      const canvas = await rendreCanvas(lignes[i].html);
+      const { largeur, hauteur } = canvasVersDimensionsMm(canvas);
+      if (!pdf) {
+        pdf = new jsPDF({ unit: 'mm', format: [largeur, hauteur], orientation: 'landscape' });
+      } else {
+        pdf.addPage([largeur, hauteur], 'landscape');
+      }
+      pdf.addImage(canvas.toDataURL('image/png'), 'PNG', 0, 0, largeur, hauteur);
+    }
 
-    setStatut('Génération du PDF (' + lignes.length + ' bons de sortie)…');
-
-    await html2pdf()
-      .set({
-        margin: 10,
-        filename: 'Bons_de_sortie_complets.pdf',
-        html2canvas: { scale: 2 },
-        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
-        pagebreak: { mode: ['css', 'legacy'], before: '.saut-page' },
-      })
-      .from(zone)
-      .save();
-
+    pdf.save('Bons_de_sortie_complets.pdf');
     setStatut('');
   } catch (err) {
     setStatut('Erreur : ' + err.message);
