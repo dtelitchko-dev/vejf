@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="fr">
 <head>
@@ -84,11 +83,15 @@
 <script>
 const { jsPDF } = window.jspdf;
 
-// largeur de reference "paysage" (A4 paysage = 297mm). On rend le contenu a
-// une largeur fixe en pixels puis on calcule la hauteur de page necessaire
-// pour que TOUT le contenu tienne sur une seule page, quelle que soit sa
-// longueur (le PDF s'adapte plutot que de couper sur plusieurs pages).
-const LARGEUR_PAGE_MM = 297;
+// Format fixe : A4 paysage (297 x 210 mm), quel que soit le contenu.
+// Une marge est appliquee sur les 4 cotes, et le contenu est mis a
+// l'echelle (sans deformation) pour tenir entierement dans la zone
+// imprimable, meme s'il ne la remplit pas entierement.
+const PAGE_LARGEUR_MM = 297;
+const PAGE_HAUTEUR_MM = 210;
+const MARGE_MM = 12;
+const ZONE_LARGEUR_MM = PAGE_LARGEUR_MM - 2 * MARGE_MM;
+const ZONE_HAUTEUR_MM = PAGE_HAUTEUR_MM - 2 * MARGE_MM;
 const LARGEUR_RENDU_PX = 1400;
 
 let currentHtml = '';
@@ -125,9 +128,28 @@ async function rendreCanvas(htmlStr){
   return canvas;
 }
 
-function canvasVersDimensionsMm(canvas){
-  const hauteurMm = (canvas.height / canvas.width) * LARGEUR_PAGE_MM;
-  return { largeur: LARGEUR_PAGE_MM, hauteur: hauteurMm };
+// Calcule la position et la taille (mm) du contenu pour qu'il tienne
+// entierement dans la zone imprimable (marges incluses), centre, sans
+// troncature ni deformation.
+function calculerPlacement(canvas){
+  const ratio = canvas.width / canvas.height;
+  let largeur = ZONE_LARGEUR_MM;
+  let hauteur = largeur / ratio;
+  if (hauteur > ZONE_HAUTEUR_MM) {
+    hauteur = ZONE_HAUTEUR_MM;
+    largeur = hauteur * ratio;
+  }
+  const x = MARGE_MM + (ZONE_LARGEUR_MM - largeur) / 2;
+  const y = MARGE_MM + (ZONE_HAUTEUR_MM - hauteur) / 2;
+  return { x, y, largeur, hauteur };
+}
+
+function ajouterPageAuPdf(pdf, canvas, premierePage){
+  if (!premierePage) {
+    pdf.addPage([PAGE_LARGEUR_MM, PAGE_HAUTEUR_MM], 'landscape');
+  }
+  const { x, y, largeur, hauteur } = calculerPlacement(canvas);
+  pdf.addImage(canvas.toDataURL('image/png'), 'PNG', x, y, largeur, hauteur);
 }
 
 grist.ready({
@@ -159,9 +181,8 @@ document.getElementById('btnExportCourant').addEventListener('click', async () =
   setStatut('Génération du PDF…');
   try {
     const canvas = await rendreCanvas(currentHtml);
-    const { largeur, hauteur } = canvasVersDimensionsMm(canvas);
-    const pdf = new jsPDF({ unit: 'mm', format: [largeur, hauteur], orientation: 'landscape' });
-    pdf.addImage(canvas.toDataURL('image/png'), 'PNG', 0, 0, largeur, hauteur);
+    const pdf = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'landscape' });
+    ajouterPageAuPdf(pdf, canvas, true);
     pdf.save(currentTitre + '.pdf');
     setStatut('');
   } catch (err) {
@@ -223,13 +244,12 @@ document.getElementById('btnExportTout').addEventListener('click', async () => {
     for (let i = 0; i < lignes.length; i++) {
       setStatut('Génération du PDF… (' + (i + 1) + ' / ' + lignes.length + ')');
       const canvas = await rendreCanvas(lignes[i].html);
-      const { largeur, hauteur } = canvasVersDimensionsMm(canvas);
       if (!pdf) {
-        pdf = new jsPDF({ unit: 'mm', format: [largeur, hauteur], orientation: 'landscape' });
+        pdf = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'landscape' });
+        ajouterPageAuPdf(pdf, canvas, true);
       } else {
-        pdf.addPage([largeur, hauteur], 'landscape');
+        ajouterPageAuPdf(pdf, canvas, false);
       }
-      pdf.addImage(canvas.toDataURL('image/png'), 'PNG', 0, 0, largeur, hauteur);
     }
 
     pdf.save('Bons_de_sortie_complets.pdf');
