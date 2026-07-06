@@ -1,11 +1,12 @@
+
 <!DOCTYPE html>
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
 <title>Bon de sortie cuisine</title>
 <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/5.0.8/jspdf.plugin.autotable.min.js"></script>
 <style>
   * { box-sizing: border-box; }
   body{
@@ -77,79 +78,250 @@
     <p class="empty">Sélectionnez une ligne dans le tableau pour afficher son bon de sortie.</p>
   </div>
 
-  <!-- conteneur hors ecran utilise pour le rendu des PDF (largeur fixe = paysage) -->
-  <div id="renderZone" style="position:fixed; left:-99999px; top:0; width:1400px; background:#fff;"></div>
-
 <script>
 const { jsPDF } = window.jspdf;
 
-// Format fixe : A4 paysage (297 x 210 mm), quel que soit le contenu.
-// Une marge est appliquee sur les 4 cotes, et le contenu est mis a
-// l'echelle (sans deformation) pour tenir entierement dans la zone
-// imprimable, meme s'il ne la remplit pas entierement.
-const PAGE_LARGEUR_MM = 297;
-const PAGE_HAUTEUR_MM = 210;
 const MARGE_MM = 12;
-const ZONE_LARGEUR_MM = PAGE_LARGEUR_MM - 2 * MARGE_MM;
-const ZONE_HAUTEUR_MM = PAGE_HAUTEUR_MM - 2 * MARGE_MM;
-const LARGEUR_RENDU_PX = 1400;
+const ORDRE_TYPE_PLAT = { 'Entrée': 0, 'Plat': 1, 'Fromage': 2, 'Dessert': 3, 'Pain': 4,
+                           'Petit-déjeuner': 5, 'Goûter': 6, 'Pique-nique': 7, 'BBQ': 8 };
+// repas regroupes sur une meme page quand ils coexistent le meme jour
+const PAIRES_REPAS = [['Déjeuner', 'Pique-nique'], ['Dîner', 'BBQ']];
+const ORDRE_AFFICHAGE = ['Petit-déjeuner', ['Déjeuner', 'Pique-nique'], 'Goûter', ['Dîner', 'BBQ']];
 
 let currentHtml = '';
+let currentEffectifId = null;
 let currentTitre = 'Bon_de_sortie';
-
-function extraireTitre(htmlStr){
-  const m1 = htmlStr.match(/<h1[^>]*>(.*?)<\/h1>/);
-  const m2 = htmlStr.match(/<h2[^>]*>(.*?)<\/h2>/);
-  const jour = m1 ? m1[1].replace(/<[^>]+>/g, '') : '';
-  const repas = m2 ? m2[1].replace(/<[^>]+>/g, '') : '';
-  const nettoye = (jour + '_' + repas)
-    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-zA-Z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '');
-  return nettoye || 'Bon_de_sortie';
-}
 
 function setStatut(msg){
   document.getElementById('statut').textContent = msg || '';
 }
 
-// Rend un fragment HTML dans la zone hors-ecran et retourne un canvas
-async function rendreCanvas(htmlStr){
-  const zone = document.getElementById('renderZone');
-  zone.innerHTML = htmlStr;
-  // laisser le temps au navigateur de mettre en page avant capture
-  await new Promise(r => setTimeout(r, 30));
-  const canvas = await html2canvas(zone, {
-    scale: 2,
-    backgroundColor: '#ffffff',
-    width: LARGEUR_RENDU_PX,
-    windowWidth: LARGEUR_RENDU_PX,
+function nettoyerNomFichier(s){
+  return s.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'Bon_de_sortie';
+}
+
+function fmtQte(l){
+  if (l.quantite) {
+    const v = l.quantite;
+    if (v === Math.trunc(v)) return String(Math.trunc(v));
+    return v.toFixed(2).replace('.', ',');
+  }
+  if (l.quantiteTexte) return l.quantiteTexte;
+  return '';
+}
+
+// Regroupe les lignes de menu par Type de plat puis par Recette, et
+// construit des lignes de tableau avec rowSpan pour les cellules fusionnees
+// (identique a la logique de regroupement utilisee pour l'apercu HTML).
+function construireLignesAutoTable(lignes){
+  const tries = [...lignes].sort((a, b) => a.idMenu - b.idMenu);
+  const groupes = new Map();
+  for (const l of tries) {
+    const tp = l.plat || '';
+    if (!groupes.has(tp)) groupes.set(tp, new Map());
+    const parRecette = groupes.get(tp);
+    const rc = l.recette || '';
+    if (!parRecette.has(rc)) parRecette.set(rc, []);
+    parRecette.get(rc).push(l);
+  }
+  const typesPlats = Array.from(groupes.keys()).sort((a, b) => {
+    const ia = ORDRE_TYPE_PLAT[a] ?? 99, ib = ORDRE_TYPE_PLAT[b] ?? 99;
+    return ia - ib || a.localeCompare(b, 'fr');
   });
-  return canvas;
+
+  const rows = [];
+  for (const tp of typesPlats) {
+    const parRecette = groupes.get(tp);
+    const recettes = Array.from(parRecette.keys());
+    const totalTp = recettes.reduce((acc, r) => acc + parRecette.get(r).length, 0);
+    let premierTp = true;
+    for (const rc of recettes) {
+      const ings = parRecette.get(rc);
+      let premierRc = true;
+      for (const ing of ings) {
+        const row = [];
+        if (premierTp) {
+          row.push({ content: tp, rowSpan: totalTp, styles: { fontStyle: 'bold', fillColor: [245, 247, 251], valign: 'top' } });
+          premierTp = false;
+        }
+        if (premierRc) {
+          row.push({ content: rc, rowSpan: ings.length, styles: { fontStyle: 'bold', valign: 'top' } });
+          premierRc = false;
+        }
+        row.push(ing.ingredient || '');
+        row.push({ content: fmtQte(ing), styles: { halign: 'right' } });
+        row.push(ing.mesure || '');
+        row.push(ing.conditionnement || '');
+        row.push(ing.sortie || '');
+        row.push(ing.observation || '');
+        rows.push(row);
+      }
+    }
+  }
+  if (rows.length === 0) {
+    rows.push([{ content: 'Aucun plat enregistré pour ce jour et ce repas.', colSpan: 8, styles: { fontStyle: 'italic', textColor: [136, 136, 136] } }]);
+  }
+  return rows;
 }
 
-// Calcule la position et la taille (mm) du contenu pour qu'il tienne
-// entierement dans la zone imprimable (marges incluses), centre, sans
-// troncature ni deformation.
-function calculerPlacement(canvas){
-  const ratio = canvas.width / canvas.height;
-  let largeur = ZONE_LARGEUR_MM;
-  let hauteur = largeur / ratio;
-  if (hauteur > ZONE_HAUTEUR_MM) {
-    hauteur = ZONE_HAUTEUR_MM;
-    largeur = hauteur * ratio;
-  }
-  const x = MARGE_MM + (ZONE_LARGEUR_MM - largeur) / 2;
-  const y = MARGE_MM + (ZONE_HAUTEUR_MM - hauteur) / 2;
-  return { x, y, largeur, hauteur };
+// Dessine un "bloc" repas (entete + tableau) a la position y courante,
+// retourne la nouvelle position y.
+function dessinerBloc(pdf, bloc, margeG, largeurUtile, y){
+  pdf.setFont('helvetica', 'bold');
+  pdf.setFontSize(12);
+  pdf.setTextColor(47, 84, 150);
+  pdf.text(bloc.repasLibelle.toUpperCase(), margeG, y + 4);
+  y += 7;
+
+  pdf.setTextColor(0, 0, 0);
+  pdf.setFont('helvetica', 'normal');
+  pdf.setFontSize(9);
+  const adultes = (bloc.animateurs || 0) + (bloc.personnel || 0);
+  const total = (bloc.total !== null && bloc.total !== undefined) ? bloc.total : (bloc.enfants + bloc.jeunes + adultes);
+  pdf.text(
+    'Enfants : ' + bloc.enfants + '    Jeunes : ' + bloc.jeunes + '    Adultes : ' + adultes + '    Total : ' + total,
+    margeG, y + 3
+  );
+  y += 7;
+
+  const rows = construireLignesAutoTable(bloc.lignes);
+  pdf.autoTable({
+    startY: y,
+    margin: { left: margeG, right: margeG, top: MARGE_MM, bottom: MARGE_MM },
+    head: [['Menu', 'Recette', 'Ingrédient', 'Quantité', 'Mesure', 'Conditionnement', 'Sortie', 'Observations']],
+    body: rows,
+    theme: 'grid',
+    styles: { fontSize: 8, cellPadding: 1.5, valign: 'top', lineColor: [51, 51, 51], lineWidth: 0.1 },
+    headStyles: { fillColor: [232, 232, 232], textColor: [0, 0, 0], fontStyle: 'bold' },
+    columnStyles: {
+      0: { cellWidth: largeurUtile * 0.11 },
+      1: { cellWidth: largeurUtile * 0.16 },
+      2: { cellWidth: largeurUtile * 0.20 },
+      3: { cellWidth: largeurUtile * 0.08 },
+      4: { cellWidth: largeurUtile * 0.08 },
+      5: { cellWidth: largeurUtile * 0.13 },
+      6: { cellWidth: largeurUtile * 0.10 },
+      7: { cellWidth: largeurUtile * 0.14 },
+    },
+  });
+
+  return pdf.lastAutoTable.finalY + 8;
 }
 
-function ajouterPageAuPdf(pdf, canvas, premierePage){
-  if (!premierePage) {
-    pdf.addPage([PAGE_LARGEUR_MM, PAGE_HAUTEUR_MM], 'landscape');
+// Dessine une page complete (jour + un ou deux blocs repas regroupes)
+function dessinerPage(pdf, page, premierePage){
+  if (!premierePage) pdf.addPage('a4', 'landscape');
+  const margeG = MARGE_MM;
+  const largeurUtile = pdf.internal.pageSize.getWidth() - 2 * margeG;
+  let y = MARGE_MM;
+
+  pdf.setFont('helvetica', 'bold');
+  pdf.setFontSize(16);
+  pdf.setTextColor(0, 0, 0);
+  pdf.text(page.jourLibelle, margeG, y + 5);
+  y += 11;
+
+  for (const bloc of page.blocs) {
+    y = dessinerBloc(pdf, bloc, margeG, largeurUtile, y);
   }
-  const { x, y, largeur, hauteur } = calculerPlacement(canvas);
-  pdf.addImage(canvas.toDataURL('image/png'), 'PNG', x, y, largeur, hauteur);
+}
+
+// Regroupe les blocs (un par effectif jour/repas) en pages, en associant
+// Dejeuner+Pique-nique et Diner+BBQ quand ils coexistent le meme jour.
+function grouperEnPages(blocs){
+  const parJour = new Map();
+  for (const b of blocs) {
+    if (!parJour.has(b.idJour)) {
+      parJour.set(b.idJour, { jourLibelle: b.jourLibelle, jourOrdre: b.jourOrdre, parRepas: new Map() });
+    }
+    parJour.get(b.idJour).parRepas.set(b.repasLibelle, b);
+  }
+
+  const joursTries = Array.from(parJour.values()).sort((a, b) => a.jourOrdre - b.jourOrdre);
+  const pages = [];
+
+  for (const jourInfo of joursTries) {
+    const dejaVus = new Set();
+    for (const item of ORDRE_AFFICHAGE) {
+      if (Array.isArray(item)) {
+        const groupe = [];
+        for (const libelle of item) {
+          if (jourInfo.parRepas.has(libelle)) {
+            groupe.push(jourInfo.parRepas.get(libelle));
+            dejaVus.add(libelle);
+          }
+        }
+        if (groupe.length) pages.push({ jourLibelle: jourInfo.jourLibelle, blocs: groupe });
+      } else if (jourInfo.parRepas.has(item)) {
+        pages.push({ jourLibelle: jourInfo.jourLibelle, blocs: [jourInfo.parRepas.get(item)] });
+        dejaVus.add(item);
+      }
+    }
+    // securite : tout repas non couvert par ORDRE_AFFICHAGE ci-dessus
+    for (const [libelle, bloc] of jourInfo.parRepas.entries()) {
+      if (!dejaVus.has(libelle)) pages.push({ jourLibelle: jourInfo.jourLibelle, blocs: [bloc] });
+    }
+  }
+  return pages;
+}
+
+async function chargerDonnees(){
+  const [effectifTable, jourTable, repasTable, menuTable] = await Promise.all([
+    grist.docApi.fetchTable('Effectif'),
+    grist.docApi.fetchTable('Jour'),
+    grist.docApi.fetchTable('Repas'),
+    grist.docApi.fetchTable('Menu'),
+  ]);
+
+  const jourById = {};
+  for (let i = 0; i < jourTable.id.length; i++) {
+    jourById[jourTable.id[i]] = { libelle: jourTable.Libelle[i], ordre: jourTable.Ordre[i] || 0 };
+  }
+  const repasById = {};
+  for (let i = 0; i < repasTable.id.length; i++) {
+    repasById[repasTable.id[i]] = repasTable.Libelle[i];
+  }
+  const menuParEffectif = new Map();
+  for (let i = 0; i < menuTable.id.length; i++) {
+    const idEff = menuTable.IdEffectif[i];
+    if (!menuParEffectif.has(idEff)) menuParEffectif.set(idEff, []);
+    menuParEffectif.get(idEff).push({
+      idMenu: menuTable.IdMenu[i],
+      plat: menuTable.Plat[i],
+      recette: menuTable.Recette[i],
+      ingredient: menuTable.Ingredient[i],
+      quantite: menuTable.Quantite[i],
+      quantiteTexte: menuTable.QuantiteTexte[i],
+      mesure: menuTable.Mesure[i],
+      conditionnement: menuTable.Conditionnement[i],
+      sortie: menuTable.Sortie[i],
+      observation: menuTable.Observation[i],
+    });
+  }
+
+  const blocs = [];
+  for (let i = 0; i < effectifTable.id.length; i++) {
+    const id = effectifTable.id[i];
+    const lignes = menuParEffectif.get(id) || [];
+    if (lignes.length === 0) continue;
+    const idJour = effectifTable.IdJour[i];
+    const jourInfo = jourById[idJour] || { libelle: '', ordre: 0 };
+    blocs.push({
+      id,
+      idJour,
+      jourLibelle: jourInfo.libelle,
+      jourOrdre: jourInfo.ordre,
+      repasLibelle: repasById[effectifTable.IdRepas[i]] || '',
+      enfants: effectifTable.Enfants[i] || 0,
+      jeunes: effectifTable.Jeunes[i] || 0,
+      animateurs: effectifTable.Animateurs[i] || 0,
+      personnel: effectifTable.Personnel[i] || 0,
+      total: effectifTable.Total[i],
+      lignes,
+    });
+  }
+  return blocs;
 }
 
 grist.ready({
@@ -162,11 +334,14 @@ grist.ready({
 grist.onRecord((record, mappings) => {
   const mapped = (grist.mapColumnNames && grist.mapColumnNames(record, mappings)) || record;
   currentHtml = (mapped && mapped.Html) || '';
+  currentEffectifId = record.id;
   const content = document.getElementById('content');
   const btn = document.getElementById('btnExportCourant');
   if (currentHtml) {
     content.innerHTML = currentHtml;
-    currentTitre = extraireTitre(currentHtml);
+    const m1 = currentHtml.match(/<h1[^>]*>(.*?)<\/h1>/);
+    const m2 = currentHtml.match(/<h2[^>]*>(.*?)<\/h2>/);
+    currentTitre = nettoyerNomFichier(((m1 ? m1[1] : '') + '_' + (m2 ? m2[1] : '')).replace(/<[^>]+>/g, ''));
     btn.disabled = false;
   } else {
     content.innerHTML = '<p class="empty">Sélectionnez une ligne dans le tableau pour afficher son bon de sortie.</p>';
@@ -175,14 +350,24 @@ grist.onRecord((record, mappings) => {
 });
 
 document.getElementById('btnExportCourant').addEventListener('click', async () => {
-  if (!currentHtml) return;
+  if (currentEffectifId == null) return;
   const btn = document.getElementById('btnExportCourant');
   btn.disabled = true;
   setStatut('Génération du PDF…');
   try {
-    const canvas = await rendreCanvas(currentHtml);
+    const blocs = await chargerDonnees();
+    const bloc = blocs.find(b => b.id === currentEffectifId);
+    if (!bloc) {
+      setStatut('Aucune donnée à exporter pour ce bon de sortie.');
+      return;
+    }
+    // si un repas associe (Dejeuner/Pique-nique ou Diner/BBQ) existe le meme
+    // jour, on l'inclut aussi sur la page, comme pour l'export complet
+    const pages = grouperEnPages(blocs.filter(b => b.idJour === bloc.idJour));
+    const page = pages.find(p => p.blocs.some(b => b.id === currentEffectifId)) || { jourLibelle: bloc.jourLibelle, blocs: [bloc] };
+
     const pdf = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'landscape' });
-    ajouterPageAuPdf(pdf, canvas, true);
+    dessinerPage(pdf, page, true);
     pdf.save(currentTitre + '.pdf');
     setStatut('');
   } catch (err) {
@@ -197,61 +382,17 @@ document.getElementById('btnExportTout').addEventListener('click', async () => {
   btn.disabled = true;
   try {
     setStatut('Chargement des données…');
-    const [effectifTable, jourTable, repasTable] = await Promise.all([
-      grist.docApi.fetchTable('Effectif'),
-      grist.docApi.fetchTable('Jour'),
-      grist.docApi.fetchTable('Repas'),
-    ]);
+    const blocs = await chargerDonnees();
+    const pages = grouperEnPages(blocs);
 
-    const ordreJour = {};
-    for (let i = 0; i < jourTable.id.length; i++) {
-      ordreJour[jourTable.id[i]] = jourTable.Ordre ? jourTable.Ordre[i] : 0;
-    }
-    const ORDRE_REPAS = ['Petit-déjeuner', 'Déjeuner', 'Goûter', 'Pique-nique', 'BBQ', 'Dîner'];
-    const libelleRepas = {};
-    for (let i = 0; i < repasTable.id.length; i++) {
-      libelleRepas[repasTable.id[i]] = repasTable.Libelle[i];
-    }
-
-    const lignes = [];
-    for (let i = 0; i < effectifTable.id.length; i++) {
-      const html = effectifTable.Html ? effectifTable.Html[i] : '';
-      if (!html) continue;
-      const idJour = effectifTable.IdJour[i];
-      const idRepas = effectifTable.IdRepas[i];
-      const libRepas = libelleRepas[idRepas] || '';
-      lignes.push({
-        html,
-        ordreJour: ordreJour[idJour] || 0,
-        ordreRepas: ORDRE_REPAS.indexOf(libRepas),
-      });
-    }
-
-    lignes.sort((a, b) => {
-      if (a.ordreJour !== b.ordreJour) return a.ordreJour - b.ordreJour;
-      const ra = a.ordreRepas === -1 ? 99 : a.ordreRepas;
-      const rb = b.ordreRepas === -1 ? 99 : b.ordreRepas;
-      return ra - rb;
-    });
-
-    if (lignes.length === 0) {
+    if (pages.length === 0) {
       setStatut('Aucun bon de sortie à exporter.');
-      btn.disabled = false;
       return;
     }
 
-    let pdf = null;
-    for (let i = 0; i < lignes.length; i++) {
-      setStatut('Génération du PDF… (' + (i + 1) + ' / ' + lignes.length + ')');
-      const canvas = await rendreCanvas(lignes[i].html);
-      if (!pdf) {
-        pdf = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'landscape' });
-        ajouterPageAuPdf(pdf, canvas, true);
-      } else {
-        ajouterPageAuPdf(pdf, canvas, false);
-      }
-    }
-
+    setStatut('Génération du PDF (' + pages.length + ' pages)…');
+    const pdf = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'landscape' });
+    pages.forEach((page, idx) => dessinerPage(pdf, page, idx === 0));
     pdf.save('Bons_de_sortie_complets.pdf');
     setStatut('');
   } catch (err) {
