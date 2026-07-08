@@ -8,85 +8,92 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/5.0.8/jspdf.plugin.autotable.min.js"></script>
 <style>
-  * { box-sizing: border-box; }
-  body{
-    font-family: "Segoe UI", Arial, sans-serif;
-    margin: 0;
-    padding: 14px;
-    color: #222;
-    background: #fafafa;
-  }
-  .toolbar{
-    display:flex;
-    gap:10px;
-    align-items:center;
-    flex-wrap:wrap;
-    margin-bottom:14px;
-  }
-  button{
-    padding:7px 14px;
-    font-size:13px;
-    border:1px solid #2f5496;
-    background:#2f5496;
-    color:#fff;
-    border-radius:6px;
-    cursor:pointer;
-    white-space:nowrap;
-  }
-  button.secondary{
-    background:#fff;
-    color:#2f5496;
-  }
-  button:disabled{
-    opacity:.5;
-    cursor:not-allowed;
-  }
-  button:hover:not(:disabled){ opacity:.9; }
-  .statut{
-    font-size:12px;
-    color:#777;
-    font-style:italic;
-  }
-  #content{
-    background:#fff;
-    border:1px solid #ccc;
-    border-radius:8px;
-    padding:16px 20px;
-    max-width:1200px;
-    overflow-x:auto;
-  }
-  #content .empty{
-    color:#777;
-    font-style:italic;
-    margin:0;
-  }
-  @media print{
-    .toolbar{ display:none; }
-    #content{ border:none; padding:0; max-width:none; }
-  }
+* { box-sizing: border-box; }
+body{
+  font-family: "Segoe UI", Arial, sans-serif;
+  margin: 0;
+  padding: 14px;
+  color: #222;
+  background: #fafafa;
+}
+.toolbar{
+  display:flex;
+  gap:10px;
+  align-items:center;
+  flex-wrap:wrap;
+  margin-bottom:14px;
+}
+button{
+  padding:7px 14px;
+  font-size:13px;
+  border:1px solid #2f5496;
+  background:#2f5496;
+  color:#fff;
+  border-radius:6px;
+  cursor:pointer;
+  white-space:nowrap;
+}
+button.secondary{
+  background:#fff;
+  color:#2f5496;
+}
+button:disabled{
+  opacity:.5;
+  cursor:not-allowed;
+}
+button:hover:not(:disabled){ opacity:.9; }
+.statut{
+  font-size:12px;
+  color:#777;
+  font-style:italic;
+}
+#content{
+  background:#fff;
+  border:1px solid #ccc;
+  border-radius:8px;
+  padding:16px 20px;
+  max-width:1200px;
+  overflow-x:auto;
+}
+#content .empty{
+  color:#777;
+  font-style:italic;
+  margin:0;
+}
+@media print{
+  .toolbar{ display:none; }
+  #content{ border:none; padding:0; max-width:none; }
+}
 </style>
 </head>
 <body>
-
-  <div class="toolbar">
-    <button id="btnExportCourant" disabled>Exporter ce bon de sortie (PDF)</button>
-    <button id="btnExportTout" class="secondary">Exporter tous les bons de sortie (PDF)</button>
-    <span id="statut" class="statut"></span>
-  </div>
-
-  <div id="content">
-    <p class="empty">Sélectionnez une ligne dans le tableau pour afficher son bon de sortie.</p>
-  </div>
+<div class="toolbar">
+  <button id="btnExportCourant" disabled>Exporter ce bon de sortie (PDF)</button>
+  <button id="btnExportTout" class="secondary">Exporter tous les bons de sortie (PDF)</button>
+  <span id="statut" class="statut"></span>
+</div>
+<div id="content">
+  <p class="empty">Sélectionnez une ligne dans le tableau pour afficher son bon de sortie.</p>
+</div>
 
 <script>
 const { jsPDF } = window.jspdf;
-
 const MARGE_MM = 12;
 const ORDRE_TYPE_PLAT = { 'Entrée': 0, 'Plat': 1, 'Fromage': 2, 'Dessert': 3, 'Pain': 4,
-                           'Petit-déjeuner': 5, 'Goûter': 6, 'Pique-nique': 7, 'BBQ': 8 };
+  'Petit-déjeuner': 5, 'Goûter': 6, 'Pique-nique': 7, 'BBQ': 8 };
+
 // repas regroupes sur une meme page quand ils coexistent le meme jour
 const PAIRES_REPAS = [['Déjeuner', 'Pique-nique'], ['Dîner', 'BBQ']];
 const ORDRE_AFFICHAGE = ['Petit-déjeuner', ['Déjeuner', 'Pique-nique'], 'Goûter', ['Dîner', 'BBQ']];
+
+// Tailles de police candidates (pt), essayees de la plus grande a la plus
+// petite jusqu'a ce que le contenu tienne integralement sur une seule page.
+const TAILLES_POLICE = [8, 7.5, 7, 6.5, 6, 5.5, 5, 4.5, 4];
+const HAUTEUR_TITRE_JOUR_MM = 11;
+const HAUTEUR_ENTETE_BLOC_MM = 14;
+// marge de securite appliquee a l'estimation de hauteur (les libelles longs
+// peuvent parfois retourner a la ligne, ce qui augmente la hauteur reelle)
+const MARGE_SECURITE = 1.08;
 
 let currentHtml = '';
 let currentEffectifId = null;
@@ -165,9 +172,42 @@ function construireLignesAutoTable(lignes){
   return rows;
 }
 
+// Estime la hauteur (mm) d'une ligne de tableau pour une taille de police
+// donnee (entete de tableau incluse : meme hauteur que les lignes de corps).
+function estimerHauteurLigne(fontSize){
+  return (fontSize * 0.42 + 3) * MARGE_SECURITE;
+}
+
+// Estime la hauteur totale (mm) d'un bloc repas (entete + tableau) pour une
+// taille de police donnee.
+function estimerHauteurBloc(bloc, fontSize){
+  const nLignes = construireLignesAutoTable(bloc.lignes).length;
+  const hLigne = estimerHauteurLigne(fontSize);
+  return HAUTEUR_ENTETE_BLOC_MM + hLigne /* ligne d'entete du tableau */ + nLignes * hLigne;
+}
+
+// Estime la hauteur totale (mm) d'une page (titre du jour + tous ses blocs)
+// pour une taille de police donnee.
+function estimerHauteurPage(page, fontSize){
+  let h = HAUTEUR_TITRE_JOUR_MM;
+  for (const bloc of page.blocs) h += estimerHauteurBloc(bloc, fontSize);
+  return h;
+}
+
+// Choisit la plus grande taille de police (parmi TAILLES_POLICE) permettant
+// de faire tenir l'integralite de la page (tous ses blocs) sur une seule
+// page PDF. Garantit qu'un entete de repas et son tableau restent toujours
+// ensemble, et que tout le contenu tient sur une seule page.
+function choisirTaillePolice(page, hauteurDisponible){
+  for (const taille of TAILLES_POLICE) {
+    if (estimerHauteurPage(page, taille) <= hauteurDisponible) return taille;
+  }
+  return TAILLES_POLICE[TAILLES_POLICE.length - 1];
+}
+
 // Dessine un "bloc" repas (entete + tableau) a la position y courante,
 // retourne la nouvelle position y.
-function dessinerBloc(pdf, bloc, margeG, largeurUtile, y){
+function dessinerBloc(pdf, bloc, margeG, largeurUtile, y, fontSize){
   pdf.setFont('helvetica', 'bold');
   pdf.setFontSize(12);
   pdf.setTextColor(47, 84, 150);
@@ -180,19 +220,21 @@ function dessinerBloc(pdf, bloc, margeG, largeurUtile, y){
   const adultes = (bloc.animateurs || 0) + (bloc.personnel || 0);
   const total = (bloc.total !== null && bloc.total !== undefined) ? bloc.total : (bloc.enfants + bloc.jeunes + adultes);
   pdf.text(
-    'Enfants : ' + bloc.enfants + '    Jeunes : ' + bloc.jeunes + '    Adultes : ' + adultes + '    Total : ' + total,
+    'Enfants : ' + bloc.enfants + '   Jeunes : ' + bloc.jeunes + '   Adultes : ' + adultes + '   Total : ' + total,
     margeG, y + 3
   );
   y += 7;
 
   const rows = construireLignesAutoTable(bloc.lignes);
+  const cellPadding = Math.max(0.6, fontSize * 0.19);
+
   pdf.autoTable({
     startY: y,
     margin: { left: margeG, right: margeG, top: MARGE_MM, bottom: MARGE_MM },
     head: [['Menu', 'Recette', 'Ingrédient', 'Quantité', 'Mesure', 'Conditionnement', 'Sortie', 'Observations']],
     body: rows,
     theme: 'grid',
-    styles: { fontSize: 8, cellPadding: 1.5, valign: 'top', lineColor: [51, 51, 51], lineWidth: 0.1 },
+    styles: { fontSize: fontSize, cellPadding: cellPadding, valign: 'top', lineColor: [51, 51, 51], lineWidth: 0.1 },
     headStyles: { fillColor: [232, 232, 232], textColor: [0, 0, 0], fontStyle: 'bold' },
     columnStyles: {
       0: { cellWidth: largeurUtile * 0.11 },
@@ -209,13 +251,20 @@ function dessinerBloc(pdf, bloc, margeG, largeurUtile, y){
   return pdf.lastAutoTable.finalY + 8;
 }
 
-// Dessine une page complete (jour + un ou deux blocs repas regroupes)
+// Dessine une page complete (jour + un ou deux blocs repas regroupes).
+// La taille de police est choisie au prealable pour que l'ensemble des
+// blocs de la page (entetes + tableaux) tienne sur cette unique page :
+// un repas et son effectif ne sont donc jamais separes de leur tableau,
+// et une page ne deborde jamais sur la suivante.
 function dessinerPage(pdf, page, premierePage){
   if (!premierePage) pdf.addPage('a4', 'landscape');
   const margeG = MARGE_MM;
   const largeurUtile = pdf.internal.pageSize.getWidth() - 2 * margeG;
-  let y = MARGE_MM;
+  const hauteurPage = pdf.internal.pageSize.getHeight();
+  const hauteurDisponible = hauteurPage - 2 * MARGE_MM;
+  const fontSize = choisirTaillePolice(page, hauteurDisponible);
 
+  let y = MARGE_MM;
   pdf.setFont('helvetica', 'bold');
   pdf.setFontSize(16);
   pdf.setTextColor(0, 0, 0);
@@ -223,7 +272,7 @@ function dessinerPage(pdf, page, premierePage){
   y += 11;
 
   for (const bloc of page.blocs) {
-    y = dessinerBloc(pdf, bloc, margeG, largeurUtile, y);
+    y = dessinerBloc(pdf, bloc, margeG, largeurUtile, y, fontSize);
   }
 }
 
@@ -263,6 +312,7 @@ function grouperEnPages(blocs){
       if (!dejaVus.has(libelle)) pages.push({ jourLibelle: jourInfo.jourLibelle, blocs: [bloc] });
     }
   }
+
   return pages;
 }
 
@@ -282,6 +332,7 @@ async function chargerDonnees(){
   for (let i = 0; i < repasTable.id.length; i++) {
     repasById[repasTable.id[i]] = repasTable.Libelle[i];
   }
+
   const menuParEffectif = new Map();
   for (let i = 0; i < menuTable.id.length; i++) {
     const idEff = menuTable.IdEffectif[i];
@@ -321,6 +372,7 @@ async function chargerDonnees(){
       lignes,
     });
   }
+
   return blocs;
 }
 
@@ -335,6 +387,7 @@ grist.onRecord((record, mappings) => {
   const mapped = (grist.mapColumnNames && grist.mapColumnNames(record, mappings)) || record;
   currentHtml = (mapped && mapped.Html) || '';
   currentEffectifId = record.id;
+
   const content = document.getElementById('content');
   const btn = document.getElementById('btnExportCourant');
   if (currentHtml) {
@@ -384,12 +437,10 @@ document.getElementById('btnExportTout').addEventListener('click', async () => {
     setStatut('Chargement des données…');
     const blocs = await chargerDonnees();
     const pages = grouperEnPages(blocs);
-
     if (pages.length === 0) {
       setStatut('Aucun bon de sortie à exporter.');
       return;
     }
-
     setStatut('Génération du PDF (' + pages.length + ' pages)…');
     const pdf = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'landscape' });
     pages.forEach((page, idx) => dessinerPage(pdf, page, idx === 0));
